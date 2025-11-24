@@ -8,6 +8,7 @@ from django.utils import timezone
 from core import settings
 from .models import File, RateLimitTracker, StorageStats
 from .serializers import FileSerializer, StorageStatsSerializer
+import os
 
 # Create your views here.
 RATE_LIMIT_CALLS = getattr(settings, 'RATE_LIMIT_CALLS', 2)
@@ -106,7 +107,6 @@ class FileViewSet( RateLimitMixin, viewsets.ModelViewSet):
         
         file_hash = File.calculate_file_hash(file_obj)
         file_size = file_obj.size
-        print(file_size, 'file_size')
         existing_file = File.objects.filter(file_hash=file_hash, user_id=user_id, is_reference=False).first()
         if existing_file:
             new_file = File.objects.create(
@@ -158,9 +158,7 @@ class FileViewSet( RateLimitMixin, viewsets.ModelViewSet):
             instance.delete()
         else:
             if instance.reference_count > 0:
-                raise ValidationError(
-                    "Cannot delete this file. Other users are still using it."
-                )            
+                return Response({'error': 'Cannot delete this original file while it has references.'}, status=status.HTTP_401_UNAUTHORIZED)
             else:
                 if instance.file and os.path.isfile(instance.file.path):
                     os.remove(instance.file.path)
@@ -186,7 +184,6 @@ class FileViewSet( RateLimitMixin, viewsets.ModelViewSet):
             )
         
         stats, _ = StorageStats.objects.get_or_create(user_id=user_id)
-        print(stats, 'stats')
         stats.update_stats()  # Ensure stats are current
         
         serializer = StorageStatsSerializer(stats)

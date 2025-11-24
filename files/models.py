@@ -79,7 +79,7 @@ class StorageStats(models.Model):
         """Calculate percentage of storage saved"""
         if self.original_storage_used == 0:
             return 0.0
-        return (self.storage_savings / self.original_storage_used) * 100
+        return round((self.storage_savings / self.original_storage_used) * 100, 2)
     
     def update_stats(self):
         files = File.objects.filter(user_id=self.user_id)
