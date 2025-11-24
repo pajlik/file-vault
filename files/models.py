@@ -1,4 +1,3 @@
-from ast import mod
 from django.utils import timezone
 from django.db import models
 import uuid
