@@ -25,6 +25,11 @@ class File(models.Model):
     original_file = models.ForeignKey('self', on_delete=models.CASCADE, null=True, blank=True, related_name='references')
     reference_count = models.IntegerField(default=0)
     
+    # AI-powered fields
+    ai_processed = models.BooleanField(default=False, db_index=True)
+    ai_processing_failed = models.BooleanField(default=False)
+    ai_processed_at = models.DateTimeField(null=True, blank=True)
+    
     class Meta:
         db_table = 'uploaded_files'
         ordering = ['-uploaded_at']
@@ -32,6 +37,7 @@ class File(models.Model):
             models.Index(fields=['user_id', 'uploaded_at']),
             models.Index(fields=['file_hash', 'user_id']),
             models.Index(fields=['file_type']),
+            models.Index(fields=['user_id', 'ai_processed']),
         ]
 
     def __str__(self):
@@ -53,6 +59,38 @@ class File(models.Model):
         self.save(update_fields=['reference_count'])
 
 
+class FileMetadata(models.Model):
+    """AI-generated metadata for files"""
+    file = models.OneToOneField(File, on_delete=models.CASCADE, related_name='metadata', primary_key=True)
+    
+    # Core metadata
+    summary = models.TextField(blank=True)
+    category = models.CharField(max_length=100, db_index=True, blank=True)
+    subcategory = models.CharField(max_length=100, blank=True)
+    
+    # Extracted information
+    tags = models.JSONField(default=list, blank=True)  # List of tags
+    entities = models.JSONField(default=dict, blank=True)  # {"people": [], "organizations": [], "locations": [], "dates": []}
+    key_info = models.JSONField(default=dict, blank=True)  # Format-specific data (invoice amounts, contract parties, etc.)
+    
+    # Semantic search support
+    embedding = models.JSONField(null=True, blank=True)  # Vector embedding for semantic search
+    
+    # Confidence scores
+    confidence_score = models.FloatField(default=0.0)  # Overall confidence in AI analysis
+    
+    created_at = models.DateTimeField(auto_now_add=True)
+    updated_at = models.DateTimeField(auto_now=True)
+    
+    class Meta:
+        db_table = 'file_metadata'
+        indexes = [
+            models.Index(fields=['category']),
+            models.Index(fields=['created_at']),
+        ]
+    
+    def __str__(self):
+        return f"Metadata for {self.file.original_filename}"
 
 class StorageStats(models.Model):
     user_id = models.CharField(max_length=255, db_index=True)
@@ -129,5 +167,3 @@ class RateLimitTracker(models.Model):
         # Cleanup old records periodically
         if cls.objects.count() % 100 == 0:
             cls.cleanup_old_records()
-
-    

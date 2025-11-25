@@ -3,9 +3,15 @@ from rest_framework.response import Response
 from rest_framework.decorators import action
 
 from core import settings
-from .models import File, RateLimitTracker, StorageStats
-from .serializers import FileSerializer, StorageStatsSerializer
+from .models import File, RateLimitTracker, StorageStats, FileMetadata
+from .serializers import FileSerializer, StorageStatsSerializer, FileMetadataSerializer
+from .ai_service import AIFileProcessor
 import os
+
+# For async processing - adjust based on your task queue
+# from .tasks import process_file_with_ai
+# OR for sync processing:
+from django.utils import timezone
 
 # Create your views here.
 RATE_LIMIT_CALLS = getattr(settings, 'RATE_LIMIT_CALLS', 2)
@@ -46,7 +52,7 @@ class FileViewSet( RateLimitMixin, viewsets.ModelViewSet):
     serializer_class = FileSerializer
 
     def list(self, request, *args, **kwargs):
-        """List files with rate limiting"""
+        """List files with rate limiting and AI-powered filtering"""
         # Check rate limit
         rate_limit_response = self.check_rate_limit(request)
         if rate_limit_response:
@@ -60,7 +66,13 @@ class FileViewSet( RateLimitMixin, viewsets.ModelViewSet):
         min_size = request.query_params.get('min_size')
         max_size = request.query_params.get('max_size')
         start_date = request.query_params.get('start_date')
-        end_date = request.query_params.get('end_date')
+        end_date = request.query_params.get('end_date')   
+     
+        # AI-powered filters
+        category = request.query_params.get('category')
+        tag = request.query_params.get('tag')
+        ai_processed_only = request.query_params.get('ai_processed') == 'true'
+
         queryset = self.queryset.filter(user_id=user_id)
 
         if search:
@@ -75,6 +87,12 @@ class FileViewSet( RateLimitMixin, viewsets.ModelViewSet):
             queryset = queryset.filter(uploaded_at__gte=start_date)
         if end_date:
             queryset = queryset.filter(uploaded_at__lte=end_date)
+        if category:
+            queryset = queryset.filter(metadata__category=category)
+        if tag:
+            queryset = queryset.filter(metadata__tags__contains=[tag])
+        if ai_processed_only:
+            queryset = queryset.filter(ai_processed=True)
                 
         serializer = self.get_serializer(queryset, many=True)
         return Response(serializer.data)
@@ -117,6 +135,22 @@ class FileViewSet( RateLimitMixin, viewsets.ModelViewSet):
                 original_file=existing_file
             )
             existing_file.increment_reference_count()
+            if hasattr(existing_file, 'metadata'):
+                original_metadata = existing_file.metadata
+                FileMetadata.objects.create(
+                    file=new_file,
+                    summary=original_metadata.summary,
+                    category=original_metadata.category,
+                    subcategory=original_metadata.subcategory,
+                    tags=original_metadata.tags,
+                    entities=original_metadata.entities,
+                    key_info=original_metadata.key_info,
+                    confidence_score=original_metadata.confidence_score
+                )
+                new_file.ai_processed = True
+                new_file.ai_processed_at = timezone.now()
+                new_file.save()
+            
             stats,_= StorageStats.objects.get_or_create(user_id=user_id)
             stats.update_stats()
         else:
@@ -134,6 +168,38 @@ class FileViewSet( RateLimitMixin, viewsets.ModelViewSet):
                 reference_count=0
             )
             stats.update_stats()
+            
+            # Process with AI asynchronously
+            # For production, use: async_task('app.tasks.process_file_with_ai', str(new_file.id))
+            # For development/demo, process synchronously:
+            try:
+                processor = AIFileProcessor()
+                file_path = new_file.file.path
+                metadata = processor.process_file(
+                    file_obj=new_file.file,
+                    file_path=file_path,
+                    file_type=new_file.file_type,
+                    original_filename=new_file.original_filename
+                )
+                
+                FileMetadata.objects.create(
+                    file=new_file,
+                    summary=metadata['summary'],
+                    category=metadata['category'],
+                    subcategory=metadata['subcategory'],
+                    tags=metadata['tags'],
+                    entities=metadata['entities'],
+                    key_info=metadata['key_info'],
+                    confidence_score=metadata['confidence_score']
+                )
+                
+                new_file.ai_processed = True
+                new_file.ai_processed_at = timezone.now()
+                new_file.save()
+            except Exception as e:
+                print(f"AI processing error: {str(e)}")
+                new_file.ai_processing_failed = True
+                new_file.save()
 
         serializer = FileSerializer(new_file)
         headers = self.get_success_headers(serializer.data)
@@ -155,7 +221,10 @@ class FileViewSet( RateLimitMixin, viewsets.ModelViewSet):
             instance.delete()
         else:
             if instance.reference_count > 0:
-                return Response({'error': 'Cannot delete this original file while it has references.'}, status=status.HTTP_401_UNAUTHORIZED)
+                return Response(
+                    {'error': 'Cannot delete this original file while it has references.'}, 
+                    status=status.HTTP_400_BAD_REQUEST
+                )
             else:
                 if instance.file and os.path.isfile(instance.file.path):
                     os.remove(instance.file.path)
@@ -181,16 +250,15 @@ class FileViewSet( RateLimitMixin, viewsets.ModelViewSet):
             )
         
         stats, _ = StorageStats.objects.get_or_create(user_id=user_id)
-        stats.update_stats()  # Ensure stats are current
+        stats.update_stats()
         
         serializer = StorageStatsSerializer(stats)
         return Response(serializer.data)
 
-        
+
     @action(detail=False, methods=['get'])
     def file_types(self, request):
         """Get list of unique file types for user"""
-        # Check rate limit
         rate_limit_response = self.check_rate_limit(request)
         if rate_limit_response:
             return rate_limit_response
@@ -207,3 +275,127 @@ class FileViewSet( RateLimitMixin, viewsets.ModelViewSet):
         ).values_list('file_type', flat=True).distinct().order_by('file_type')
         
         return Response(list(file_types))
+    
+    @action(detail=False, methods=['get'])
+    def categories(self, request):
+        """Get list of AI-detected categories for user's files"""
+        rate_limit_response = self.check_rate_limit(request)
+        if rate_limit_response:
+            return rate_limit_response
+        
+        user_id = request.headers.get('UserId')
+        if not user_id:
+            return Response(
+                {'error': 'UserId header is required'},
+                status=status.HTTP_400_BAD_REQUEST
+            )
+        
+        categories = FileMetadata.objects.filter(
+            file__user_id=user_id
+        ).values_list('category', flat=True).distinct().order_by('category')
+        
+        return Response(list(categories))
+    
+    @action(detail=False, methods=['get'])
+    def tags(self, request):
+        """Get all unique tags from user's files"""
+        rate_limit_response = self.check_rate_limit(request)
+        if rate_limit_response:
+            return rate_limit_response
+        
+        user_id = request.headers.get('UserId')
+        if not user_id:
+            return Response(
+                {'error': 'UserId header is required'},
+                status=status.HTTP_400_BAD_REQUEST
+            )
+        
+        # Get all metadata with tags
+        all_metadata = FileMetadata.objects.filter(
+            file__user_id=user_id
+        ).values_list('tags', flat=True)
+        
+        # Flatten and deduplicate tags
+        all_tags = set()
+        for tags_list in all_metadata:
+            if tags_list:
+                all_tags.update(tags_list)
+        
+        return Response(sorted(list(all_tags)))
+    
+    @action(detail=False, methods=['post'])
+    def smart_search(self, request):
+        """Semantic search across files using AI"""
+        rate_limit_response = self.check_rate_limit(request)
+        if rate_limit_response:
+            return rate_limit_response
+        
+        user_id = request.headers.get('UserId')
+        if not user_id:
+            return Response(
+                {'error': 'UserId header is required'},
+                status=status.HTTP_400_BAD_REQUEST
+            )
+        
+        query = request.data.get('query')
+        if not query:
+            return Response(
+                {'error': 'Query parameter is required'},
+                status=status.HTTP_400_BAD_REQUEST
+            )
+        
+        # Get user's files with metadata
+        files_with_metadata = File.objects.filter(
+            user_id=user_id,
+            ai_processed=True
+        ).select_related('metadata')
+        
+        if not files_with_metadata.exists():
+            return Response([])
+        
+        # Prepare data for AI
+        files_data = []
+        for file_obj in files_with_metadata:
+            if hasattr(file_obj, 'metadata'):
+                files_data.append({
+                    'file_id': str(file_obj.id),
+                    'filename': file_obj.original_filename,
+                    'category': file_obj.metadata.category,
+                    'summary': file_obj.metadata.summary,
+                    'tags': file_obj.metadata.tags
+                })
+        
+        # Perform semantic search
+        processor = AIFileProcessor()
+        results = processor.semantic_search(query, files_data)
+        if not results:
+            return Response({
+                'message': 'No relevant files found for your query',
+                'results': []
+            })
+    
+
+        
+        # Return matching files
+        if results:
+            file_ids = [r['file_id'] for r in results]
+            files = File.objects.filter(id__in=file_ids)
+            
+            # Preserve order from AI results
+            files_dict = {str(f.id): f for f in files}
+            ordered_files = [files_dict[fid] for fid in file_ids if fid in files_dict]
+            
+            serializer = FileSerializer(ordered_files, many=True, context={'request': request})
+            
+            # Add relevance scores
+            response_data = []
+            for i, file_data in enumerate(serializer.data):
+                result = next((r for r in results if r['file_id'] == file_data['id']), None)
+                if result:
+                    file_data['relevance_score'] = result.get('relevance_score', 0)
+                    file_data['match_reason'] = result.get('reason', '')
+                response_data.append(file_data)
+            
+            return Response(response_data)
+        
+        return Response([])
