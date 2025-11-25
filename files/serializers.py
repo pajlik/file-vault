@@ -7,7 +7,7 @@ class FileMetadataSerializer(serializers.ModelSerializer):
         fields = [
             'summary', 'category', 'subcategory', 'tags', 
             'entities', 'key_info', 'confidence_score',
-            'created_at', 'updated_at'
+            'created_at', 'updated_at', 'embedding', 'embedding_model', 'embedding_computed_at'
         ]
 
 

@@ -12,7 +12,9 @@ import base64
 from typing import Dict, Any, Optional, List
 from django.conf import settings
 from dotenv import load_dotenv  # Add this import
-
+from sentence_transformers import SentenceTransformer
+import numpy as np
+from sklearn.metrics.pairwise import cosine_similarity
 # Add this at the top of the file
 load_dotenv()  # Load .env file
 
@@ -43,6 +45,24 @@ class AIFileProcessor:
             api_key=os.environ.get("ANTHROPIC_API_KEY")
         )
         self.model = "claude-sonnet-4-20250514"
+        try:
+            self.embedding_model = SentenceTransformer('all-mpnet-base-v2')
+        except Exception as e:
+            print(f"Warning: Could not load embedding model: {e}")
+            self.embedding_model = None
+    
+    
+    def compute_embedding(self, text: str) -> Optional[List[float]]:
+        """Compute embedding vector for text"""
+        if not self.embedding_model or not text:
+            return None
+        
+        try:
+            embedding = self.embedding_model.encode(text)
+            return embedding.tolist()  # Convert numpy array to list for JSON
+        except Exception as e:
+            print(f"Error computing embedding: {e}")
+            return None
     
     def process_file(self, file_obj, file_path: str, file_type: str, original_filename: str) -> Dict[str, Any]:
         """
@@ -58,6 +78,10 @@ class AIFileProcessor:
             
             # Use Claude to analyze the content
             metadata = self._analyze_with_claude(content, original_filename, file_type)
+            
+            # ADD THIS: Compute embedding from summary
+            if metadata.get('summary'):
+                metadata['embedding'] = self.compute_embedding(metadata['summary'])
             
             return metadata
             
@@ -306,54 +330,46 @@ Respond ONLY with valid JSON."""
     
     def semantic_search(self, query: str, user_files_metadata: List[Dict]) -> List[Dict]:
         """
-        Perform semantic search across user's files
-        Returns ranked list of file IDs with relevance scores
+        Perform semantic search using embeddings (MUCH faster than Claude API)
+        Returns ranked list of files with relevance scores
         """
-        if not user_files_metadata:
+        if not user_files_metadata or not self.embedding_model:
             return []
         
         try:
-            # Build context of all files
-            files_context = "\n\n".join([
-                f"File ID: {m['file_id']}\nFilename: {m['filename']}\nCategory: {m['category']}\nSummary: {m['summary']}\nTags: {', '.join(m['tags'])}"
-                for m in user_files_metadata[:50]  # Limit to 50 files to avoid token limits
-            ])
+            # Compute query embedding
+            query_embedding = self.compute_embedding(query)
+            print(query_embedding, 'query_embedding')
+            if not query_embedding:
+                return []
             
-            prompt = f"""Given this search query: "{query}"
-
-Find the most relevant files from this list:
-
-{files_context}
-
-Return a JSON array of ONLY the relevant files (relevance_score >= 0.5), ranked by relevance:
-[
-  {{"file_id": "uuid", "relevance_score": 0.0-1.0, "reason": "why this file matches"}},
-  ...
-]
-IMPORTANT: 
-- Only include files with relevance_score >= 0.5
-- If no files are relevant, return an empty array []
-- Maximum 10 results
-- Respond ONLY with valid JSON array."""
-
-            response = self.client.messages.create(
-                model=self.model,
-                max_tokens=1500,
-                messages=[
-                    {"role": "user", "content": prompt}
-                ]
-            )
+            # Filter files that have embeddings
+            files_with_embeddings = [
+                f for f in user_files_metadata 
+                if f.get('embedding') is not None
+            ]
             
-            response_text = response.content[0].text.strip()
+            if not files_with_embeddings:
+                return []
             
-            # Clean response
-            if response_text.startswith("```"):
-                response_text = response_text.split("```")[1]
-                if response_text.startswith("json"):
-                    response_text = response_text[4:]
+            # Compute similarities
+            file_embeddings = np.array([f['embedding'] for f in files_with_embeddings])
+            similarities = cosine_similarity([query_embedding], file_embeddings)[0]
             
-            results = json.loads(response_text)
-            return results
+            # Create results with scores
+            results = []
+            for i, file_data in enumerate(files_with_embeddings):
+                score = float(similarities[i])
+                if score >= 0.3:  # Relevance threshold
+                    results.append({
+                        'file_id': file_data['file_id'],
+                        'relevance_score': score,
+                        'reason': f"Semantic similarity: {score:.2f}"
+                    })
+            
+            # Sort by relevance and return top 10
+            results.sort(key=lambda x: x['relevance_score'], reverse=True)
+            return results[:10]
             
         except Exception as e:
             print(f"Semantic search error: {str(e)}")

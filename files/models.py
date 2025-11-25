@@ -69,15 +69,17 @@ class FileMetadata(models.Model):
     subcategory = models.CharField(max_length=100, blank=True)
     
     # Extracted information
-    tags = models.JSONField(default=list, blank=True)  # List of tags
-    entities = models.JSONField(default=dict, blank=True)  # {"people": [], "organizations": [], "locations": [], "dates": []}
-    key_info = models.JSONField(default=dict, blank=True)  # Format-specific data (invoice amounts, contract parties, etc.)
+    tags = models.JSONField(default=list, blank=True)
+    entities = models.JSONField(default=dict, blank=True)
+    key_info = models.JSONField(default=dict, blank=True)
     
-    # Semantic search support
-    embedding = models.JSONField(null=True, blank=True)  # Vector embedding for semantic search
+    # Semantic search support - UPDATED FIELDS
+    embedding = models.JSONField(null=True, blank=True)  # Changed from 'embedding'
+    embedding_model = models.CharField(max_length=100, default='all-MiniLM-L6-v2', blank=True)  # NEW
+    embedding_computed_at = models.DateTimeField(null=True, blank=True)  # NEW
     
     # Confidence scores
-    confidence_score = models.FloatField(default=0.0)  # Overall confidence in AI analysis
+    confidence_score = models.FloatField(default=0.0)
     
     created_at = models.DateTimeField(auto_now_add=True)
     updated_at = models.DateTimeField(auto_now=True)

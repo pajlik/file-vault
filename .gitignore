@@ -39,3 +39,5 @@ Thumbs.db
 
 # Uploads (don't commit user files!)
 media/uploads/
+
+migrations/
