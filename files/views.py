@@ -145,7 +145,10 @@ class FileViewSet( RateLimitMixin, viewsets.ModelViewSet):
                     tags=original_metadata.tags,
                     entities=original_metadata.entities,
                     key_info=original_metadata.key_info,
-                    confidence_score=original_metadata.confidence_score
+                    confidence_score=original_metadata.confidence_score,
+                    embedding=original_metadata.embedding,
+                    embedding_model=original_metadata.embedding_model,
+                    embedding_computed_at=original_metadata.embedding_computed_at
                 )
                 new_file.ai_processed = True
                 new_file.ai_processed_at = timezone.now()
@@ -181,7 +184,7 @@ class FileViewSet( RateLimitMixin, viewsets.ModelViewSet):
                     file_type=new_file.file_type,
                     original_filename=new_file.original_filename
                 )
-                
+                print(metadata, 'metadata')
                 FileMetadata.objects.create(
                     file=new_file,
                     summary=metadata['summary'],
@@ -190,7 +193,10 @@ class FileViewSet( RateLimitMixin, viewsets.ModelViewSet):
                     tags=metadata['tags'],
                     entities=metadata['entities'],
                     key_info=metadata['key_info'],
-                    confidence_score=metadata['confidence_score']
+                    confidence_score=metadata['confidence_score'],
+                    embedding=metadata.get('embedding'),
+                    embedding_model=metadata.get('embedding_model'),
+                    embedding_computed_at=timezone.now() if metadata.get('embedding') else None
                 )
                 
                 new_file.ai_processed = True
@@ -343,17 +349,19 @@ class FileViewSet( RateLimitMixin, viewsets.ModelViewSet):
                 {'error': 'Query parameter is required'},
                 status=status.HTTP_400_BAD_REQUEST
             )
-        
-        # Get user's files with metadata
         files_with_metadata = File.objects.filter(
             user_id=user_id,
-            ai_processed=True
+            ai_processed=True,
+            metadata__embedding__isnull=False  # ADD THIS LINE - only files with embeddings
         ).select_related('metadata')
-        
+
         if not files_with_metadata.exists():
-            return Response([])
-        
-        # Prepare data for AI
+            return Response({
+                'message': 'No files available for search yet. Files are being processed.',
+                'results': []
+            })
+
+        # Prepare data for semantic search
         files_data = []
         for file_obj in files_with_metadata:
             if hasattr(file_obj, 'metadata'):
@@ -362,8 +370,10 @@ class FileViewSet( RateLimitMixin, viewsets.ModelViewSet):
                     'filename': file_obj.original_filename,
                     'category': file_obj.metadata.category,
                     'summary': file_obj.metadata.summary,
-                    'tags': file_obj.metadata.tags
+                    'tags': file_obj.metadata.tags,
+                    'embedding': file_obj.metadata.embedding # ADD THIS LINE
                 })
+
         
         # Perform semantic search
         processor = AIFileProcessor()
